@@ -195,15 +195,12 @@ def _error_payload(exc: Exception) -> dict:
     except Exception:
         expected = False
 
-    # The export for a recent window may still be building server-side. Point
-    # the caller at the fix instead of leaving "status=pending" cryptic.
+    # Point the caller at the fix instead of leaving "status=pending" cryptic.
     if type(exc).__name__ == "ExportNotReadyError":
         payload["hint"] = (
-            "One or more markets in this window have no built export yet "
-            "(status=pending). Exports build progressively and can be "
-            "non-contiguous across a window, so neither older nor newer is "
-            "reliably safe: narrow to a window you know is fully settled, or "
-            "retry later."
+            "Markets that have not resolved have no history file yet; it is "
+            "built after they resolve, usually within 2 hours. End the window "
+            "before the newest markets resolve, or retry later."
         )
 
     details = getattr(exc, "details", None)

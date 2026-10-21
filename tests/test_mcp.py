@@ -330,5 +330,5 @@ def test_runner_error_payload_hints_on_export_not_ready():
     assert payload["error"] == "ExportNotReadyError"
     # the hint must not prescribe a misleading direction ("older")
     assert "window" in payload["hint"].lower()
-    assert "older" not in payload["hint"] or "non-contiguous" in payload["hint"]
+    assert "older" not in payload["hint"]
     assert "traceback" not in payload

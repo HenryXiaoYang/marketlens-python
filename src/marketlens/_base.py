@@ -166,7 +166,10 @@ def _raise_for_error(response: httpx.Response) -> None:
         m = _EXPORT_NOT_READY_RE.search(message)
         if m:
             export_status = m.group(1)
-            last_error = m.group(2)
+            # Only a failed export carries an error after ": "; otherwise the
+            # server explains why the file is not built yet.
+            if export_status == "failed":
+                last_error = m.group(2)
         raise ExportNotReadyError(
             response.status_code, code, message,
             export_status=export_status, last_error=last_error,

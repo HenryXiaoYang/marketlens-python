@@ -124,8 +124,11 @@ def _has_history_file(dir_path: Path, market_id: str) -> bool:
     )
 
 
-def _export_skip_reason(exc: ExportNotReadyError) -> str:
-    return "export failed" if exc.export_status == "failed" else "export pending"
+def _export_skip_reason(export_status: str | None, market: Market) -> str:
+    if export_status == "failed":
+        return "export failed"
+    # History files are built only after a market resolves.
+    return "export pending" if market.status == "resolved" else "market not resolved yet"
 
 
 def _coverage_gap(market: Market, after_ms: int | None, before_ms: int | None) -> str | None:
@@ -527,7 +530,7 @@ class _EngineCore:
                 present_total += 1
             else:
                 if m.id in pending_ids:
-                    self._record_skip(m, "export pending")
+                    self._record_skip(m, _export_skip_reason(None, m))
                 elif m.id in failed_ids:
                     self._record_skip(m, "export failed")
                 elif m.id in outside_ids:
@@ -1355,7 +1358,7 @@ class _EngineCore:
                         yielded = True
                         yield market, event, book
                 except ExportNotReadyError as exc:
-                    self._record_skip(market, _export_skip_reason(exc))
+                    self._record_skip(market, _export_skip_reason(exc.export_status, market))
                 except StoreUnavailableError:
                     self._record_skip(market, "history store unavailable")
                 except HistoryWindowError as exc:
@@ -2199,7 +2202,7 @@ class AsyncBacktestEngine(_EngineCore):
                         yielded = True
                         yield market, event, book
                 except ExportNotReadyError as exc:
-                    self._record_skip(market, _export_skip_reason(exc))
+                    self._record_skip(market, _export_skip_reason(exc.export_status, market))
                 except StoreUnavailableError:
                     self._record_skip(market, "history store unavailable")
                 except HistoryWindowError as exc:
@@ -2439,7 +2442,8 @@ class AlphaBacktestEngine(BacktestEngine):
         for entry in result.pending:
             mid = getattr(entry, "market_id", entry)
             if mid in by_id:
-                self._record_skip(by_id[mid], "bar export not built")
+                m = by_id[mid]
+                self._record_skip(m, "bar export not built" if m.status == "resolved" else "market not resolved yet")
         for mid, exc in result.outside.items():
             self._window_skip(by_id[mid], exc, _coerce_timestamp(self._window[1]))
         return len(markets)

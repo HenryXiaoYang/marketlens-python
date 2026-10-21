@@ -94,8 +94,9 @@ class SkippedMarket(BaseModel):
 
     ``reason``: "outside window" (its life misses the window), "no coverage
     in window" (its data span misses the window), "no events in window",
-    "no history file", "export pending", "export failed", or "bar export
-    not built". ``data_start`` / ``data_end`` are the market's data span
+    "no history file", "market not resolved yet" (history files are built
+    after a market resolves), "export pending", "export failed", or "bar
+    export not built". ``data_start`` / ``data_end`` are the market's data span
     when the server reported one.
     """
     model_config = ConfigDict(frozen=True)

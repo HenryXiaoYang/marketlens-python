@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.12] 2026-10-21
+
+* A backtest skips a market that has not resolved yet as "market not resolved yet" instead of "export pending", since history files are built only after a market resolves (usually within 2 hours). "export pending" now means a resolved market whose file is still being built.
+* `ExportNotReadyError.last_error` is set only when the export failed. The server's message now explains why a file is not ready, and that explanation used to land in `last_error` as if it were an error.
+* The MCP backtest hint for `ExportNotReadyError` says that markets have no history file until they resolve, instead of describing exports as building out of order.
+
 ## [1.8.11] 2026-10-01
 
 * A backtest reusing a `data_dir` downloads the markets it has no file for. Before, any history file in the directory stopped the download, so a widened window or an added market replayed only the files already there and skipped the rest as "no history file". Files on disk are never fetched again, and a rerun with every file present makes no download request.

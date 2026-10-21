@@ -206,14 +206,14 @@ class TestMarketDownload:
                 409,
                 json={"error": {
                     "code": "EXPORT_NOT_READY",
-                    "message": "Export not ready (status=pending): worker crashed at step 3",
+                    "message": "Export not ready (status=failed): worker crashed at step 3",
                 }},
             )
         )
         with pytest.raises(ExportNotReadyError) as ei:
             client.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert ei.value.code == "EXPORT_NOT_READY"
-        assert ei.value.export_status == "pending"
+        assert ei.value.export_status == "failed"
         assert ei.value.last_error == "worker crashed at step 3"
 
     def test_409_without_last_error(self, mock_api, client, tmp_path):

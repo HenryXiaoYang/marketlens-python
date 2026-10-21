@@ -247,7 +247,8 @@ class Exports:
 
         Raises:
             ExportNotReadyError: The pre-built parquet for this market is not
-                on the bucket yet. Try again later or pick a different market.
+                built yet. Files are built after the market resolves, usually
+                within 2 hours; try again later or pick a different market.
         """
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
