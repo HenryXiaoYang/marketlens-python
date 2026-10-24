@@ -139,6 +139,7 @@ class FillSimulator:
         slippage_bps: int = 0,
         limit_fill_rate: float = 1.0,
         queue_position: bool = False,
+        consume_liquidity: bool = True,
     ) -> None:
         self._fee_model = fee_model
         self._taker_only = taker_only
@@ -146,6 +147,27 @@ class FillSimulator:
         self._slippage_bps = float(slippage_bps)
         self._limit_fill_rate = float(limit_fill_rate)
         self._tracker = QueuePositionTracker() if queue_position else None
+        # Size our own taker fills took from a level, (market, book side, price) -> shares.
+        # Historical data never shows our trades, so the level keeps its recorded size
+        # until the data next updates it; until then we can't take the same shares twice.
+        self._consumed: dict[tuple[str, str, float], float] | None = {} if consume_liquidity else None
+        self._taken: tuple[str, str, list[tuple[float, float]]] | None = None
+
+    def _available(self, market_id: str, side: str, level) -> float:
+        size = level.size
+        if self._consumed is not None:
+            size -= self._consumed.get((market_id, side, _qp(level.price)), 0.0)
+        return max(0.0, size) * self._max_fill_fraction
+
+    def commit_taken(self) -> None:
+        """The last taker fill was applied: its shares are gone from the book."""
+        if self._consumed is None or self._taken is None:
+            return
+        market_id, side, taken = self._taken
+        self._taken = None
+        for price, size in taken:
+            key = (market_id, side, _qp(price))
+            self._consumed[key] = self._consumed.get(key, 0.0) + size
 
     def register_limit_order(self, order: Order, book: OrderBook) -> None:
         if self._tracker is not None:
@@ -156,10 +178,15 @@ class FillSimulator:
             self._tracker.unregister(order_id)
 
     def notify_delta(self, market_id: str, price: float, new_size: float, side: str) -> None:
+        if self._consumed:
+            self._consumed.pop((market_id, side, _qp(price)), None)
         if self._tracker is not None:
             self._tracker.on_delta(market_id, price, new_size, side)
 
     def notify_snapshot(self, market_id: str, book: OrderBook) -> None:
+        if self._consumed:
+            for key in [k for k in self._consumed if k[0] == market_id]:
+                del self._consumed[key]
         if self._tracker is not None:
             self._tracker.on_snapshot(market_id, book)
 
@@ -172,20 +199,24 @@ class FillSimulator:
 
         # BUY_YES / SELL_NO walk asks; SELL_YES / BUY_NO walk bids
         if order.side in (OrderSide.BUY_YES, OrderSide.SELL_NO):
-            levels = book.asks
+            levels, book_side = book.asks, "SELL"
         else:
-            levels = book.bids
+            levels, book_side = book.bids, "BUY"
 
         total_filled = 0.0
         total_cost = 0.0  # in YES-price space
+        taken: list[tuple[float, float]] = []
 
         for level in levels:
-            available = level.size * self._max_fill_fraction
+            available = self._available(order.market_id, book_side, level)
             fill = min(remaining - total_filled, available)
             if fill <= 0:
+                if available <= 0:
+                    continue  # level used up by our earlier fills: walk on
                 break
             total_cost += fill * level.price
             total_filled += fill
+            taken.append((level.price, fill))
             if total_filled >= remaining:
                 break
 
@@ -217,6 +248,7 @@ class FillSimulator:
             return None
         fill_price_q = _qp(fill_price)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
+        self._taken = (order.market_id, book_side, taken)
 
         return Fill(
             order_id=order.id,
@@ -252,21 +284,21 @@ class FillSimulator:
         # Determine which side of the book to walk and the price constraint.
         # YES-denominated book: asks sorted ascending, bids sorted descending.
         if order.side == OrderSide.BUY_YES:
-            levels = book.asks
+            levels, book_side = book.asks, "SELL"
             yes_limit = limit_price
             accept = lambda lp: lp <= yes_limit  # noqa: E731
         elif order.side == OrderSide.SELL_YES:
-            levels = book.bids
+            levels, book_side = book.bids, "BUY"
             yes_limit = limit_price
             accept = lambda lp: lp >= yes_limit  # noqa: E731
         elif order.side == OrderSide.BUY_NO:
             # BUY_NO at p ≡ SELL_YES at (1-p): walk bids, accept bid >= (1-p)
-            levels = book.bids
+            levels, book_side = book.bids, "BUY"
             yes_limit = 1.0 - limit_price
             accept = lambda lp: lp >= yes_limit  # noqa: E731
         elif order.side == OrderSide.SELL_NO:
             # SELL_NO at p ≡ BUY_YES at (1-p): walk asks, accept ask <= (1-p)
-            levels = book.asks
+            levels, book_side = book.asks, "SELL"
             yes_limit = 1.0 - limit_price
             accept = lambda lp: lp <= yes_limit  # noqa: E731
         else:
@@ -274,16 +306,20 @@ class FillSimulator:
 
         total_filled = 0.0
         total_cost = 0.0
+        taken: list[tuple[float, float]] = []
 
         for level in levels:
             if not accept(level.price):
                 break
-            available = level.size * self._max_fill_fraction
+            available = self._available(order.market_id, book_side, level)
             fill = min(remaining - total_filled, available)
             if fill <= 0:
+                if available <= 0:
+                    continue  # level used up by our earlier fills: walk on
                 break
             total_cost += fill * level.price
             total_filled += fill
+            taken.append((level.price, fill))
             if total_filled >= remaining:
                 break
 
@@ -302,6 +338,7 @@ class FillSimulator:
             return None
         fill_price_q = _qp(fill_price)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
+        self._taken = (order.market_id, book_side, taken)
 
         return Fill(
             order_id=order.id,

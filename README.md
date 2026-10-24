@@ -330,9 +330,11 @@ Execution `ctx` provides `buy_yes()`, `sell_yes()`, `buy_no()`, `sell_no()`, `ca
 |-----------|---------|-------------|
 | `latency_ms` | `50` | Order-to-fill delay in milliseconds |
 | `queue_position` | `False` | CLOB queue modeling: fills only when queue-ahead is drained by trades |
+| `cancel_latency_ms` | `None` | Delay before a cancel takes effect; the order can fill until then. `None` = `latency_ms` |
+| `consume_liquidity` | `True` | Your taker fills take their shares out of the replayed book until the data next updates that level |
 | `limit_fill_rate` | `0.1` | Fraction of trade size filling your limit (ignored when `queue_position=True`) |
 | `slippage_bps` | `0` | Extra price penalty on market order fills |
-| `fees` | `"polymarket"` | Auto-detects crypto vs sports fee schedule; `None` for zero fees |
+| `fees` | `"polymarket"` | Polymarket's 2026 schedule by category (taker `shares * rate * p(1-p)`, crypto 0.07; makers get the category's rebate share back as a negative fee); `None` for zero fees |
 | `max_fill_fraction` | `1.0` | Max fraction of each book level consumed per order |
 | `include_trades` | `True` | Fetch trade data (required for limit fills and `on_trade`) |
 | `settlement_delay_ms` | `5000` | Delay before filled tokens become sellable (on-chain settlement) |

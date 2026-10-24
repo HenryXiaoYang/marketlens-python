@@ -2,6 +2,13 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [Unreleased] (HenryXiaoYang fork)
+
+* Fees follow Polymarket's 2026 schedule (docs.polymarket.com/trading/fees): taker fee `shares * rate * p(1-p)` rounded to 5 d.p., with each category's rate (crypto 0.07, sports 0.05, ...). The crypto fee was the old `shares * p * 0.25 * (p(1-p))^2`, 2x too low at 50c and 6x at 95c. Maker fills get the category's rebate share of the taker fee back as a negative fee (an estimate: real rebates are pooled per market).
+* `cancel_latency_ms` (default: `latency_ms`): a cancel takes effect only when it reaches the exchange, so a resting order can still fill in between, and an order already in flight still arrives.
+* An order no longer fills on the event at or after its `cancel_after` time (expiry is checked before fills).
+* `consume_liquidity` (default on): your own taker fills remove the shares they took from the replayed book until the data next updates that level, so back-to-back orders can't take the same depth twice.
+
 ## [1.8.12] 2026-10-21
 
 * A backtest skips a market that has not resolved yet as "market not resolved yet" instead of "export pending", since history files are built only after a market resolves (usually within 2 hours). "export pending" now means a resolved market whose file is still being built.

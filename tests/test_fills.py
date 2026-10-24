@@ -187,3 +187,41 @@ class TestEdgeCases:
         fill = sim.try_fill_crossing_limit_order(order, book, 1000)
         assert fill is not None
         assert fill.size == pytest.approx(50.0)  # 100 * 0.5
+
+
+class TestConsumeLiquidity:
+    """Our own taker fills take their shares out of the replayed book until the data updates the level."""
+
+    def _market(self, size):
+        return Order(id="m", market_id="test-market", side=OrderSide.BUY_YES, order_type=OrderType.MARKET,
+                     size=float(size), submitted_at=0)
+
+    def test_second_order_walks_past_what_the_first_took(self):
+        sim = _sim(ZeroFeeModel())
+        book = _make_book([(0.48, 100)], [(0.52, 60), (0.53, 100)])
+        first = sim.try_fill_market_order(self._market(50), book, 1000)
+        sim.commit_taken()
+        second = sim.try_fill_market_order(self._market(50), book, 1001)
+        assert first.price == pytest.approx(0.52)
+        assert second.price == pytest.approx((10 * 0.52 + 40 * 0.53) / 50)
+
+    def test_a_delta_on_the_level_resets_it(self):
+        sim = _sim(ZeroFeeModel())
+        book = _make_book([(0.48, 100)], [(0.52, 60), (0.53, 100)])
+        sim.try_fill_market_order(self._market(60), book, 1000)
+        sim.commit_taken()
+        sim.notify_delta("test-market", 0.52, 60, "SELL")
+        assert sim.try_fill_market_order(self._market(60), book, 1001).price == pytest.approx(0.52)
+
+    def test_uncommitted_fill_takes_nothing(self):
+        sim = _sim(ZeroFeeModel())
+        book = _make_book([(0.48, 100)], [(0.52, 60), (0.53, 100)])
+        sim.try_fill_market_order(self._market(60), book, 1000)  # e.g. rejected for cash
+        assert sim.try_fill_market_order(self._market(60), book, 1001).price == pytest.approx(0.52)
+
+    def test_off(self):
+        sim = FillSimulator(fee_model=ZeroFeeModel(), consume_liquidity=False)
+        book = _make_book([(0.48, 100)], [(0.52, 60), (0.53, 100)])
+        sim.try_fill_market_order(self._market(60), book, 1000)
+        sim.commit_taken()
+        assert sim.try_fill_market_order(self._market(60), book, 1001).price == pytest.approx(0.52)

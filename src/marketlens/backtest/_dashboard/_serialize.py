@@ -236,7 +236,8 @@ def _serialize_config(result: BacktestResult) -> dict | None:
     else:
         for field in (
             "taker_only", "max_fill_fraction", "latency_ms", "slippage_bps",
-            "limit_fill_rate", "queue_position", "settlement_delay_ms",
+            "limit_fill_rate", "queue_position", "cancel_latency_ms", "consume_liquidity",
+            "settlement_delay_ms",
         ):
             if hasattr(cfg, field):
                 d[field] = getattr(cfg, field)
