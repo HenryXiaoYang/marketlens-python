@@ -347,6 +347,12 @@ class BacktestConfig:
     slippage_bps: int = 0
     limit_fill_rate: float = 0.1
     queue_position: bool = False
+    # Delay before a cancel reaches the exchange; the order can still fill until
+    # then. None = latency_ms.
+    cancel_latency_ms: int | None = None
+    # Our own taker fills remove the shares they took from the replayed book until
+    # the data next updates that level.
+    consume_liquidity: bool = True
     settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
     progress: bool = True  # show rich progress bars for fetch/backtest
     # Concurrent per-market downloads for the auto-download path (markets with
@@ -377,8 +383,12 @@ class _EngineCore:
             slippage_bps=self._config.slippage_bps,
             limit_fill_rate=self._config.limit_fill_rate,
             queue_position=self._config.queue_position,
+            consume_liquidity=self._config.consume_liquidity,
         )
         self._latency_ms = self._config.latency_ms
+        cl = self._config.cancel_latency_ms
+        self._cancel_latency_ms = self._latency_ms if cl is None else cl
+        self._pending_cancels: list[tuple[int, Order]] = []  # (effective_at, order)
         self._settlement_delay_ms = self._config.settlement_delay_ms
         self._portfolio = Portfolio(self._config.initial_cash)
         self._order_counter = 0
@@ -892,13 +902,47 @@ class _EngineCore:
         self._portfolio.merge(target, size)
 
     def cancel_order(self, order: Order) -> None:
+        """Cancel ``order`` once the cancel reaches the exchange (``cancel_latency_ms``);
+        it can still fill until then, and an order still in flight still arrives."""
+        if order.status not in (OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
+            return
+        if self._cancel_latency_ms <= 0:
+            self._cancel_now(order)
+        elif all(o.id != order.id for _, o in self._pending_cancels):
+            self._pending_cancels.append((self._current_time + self._cancel_latency_ms, order))
+
+    def _apply_due_cancels(self, t: int, *, strict: bool = False) -> None:
+        """Cancels effective at or before ``t`` (strictly before with ``strict``)."""
+        if not self._pending_cancels:
+            return
+        is_due = (lambda at: at < t) if strict else (lambda at: at <= t)
+        due = [o for at, o in self._pending_cancels if is_due(at)]
+        if not due:
+            return
+        self._pending_cancels = [(at, o) for at, o in self._pending_cancels if not is_due(at)]
+        for o in due:
+            if o.status == OrderStatus.PENDING:
+                # Still in flight: it arrives (and may take) before the cancel lands.
+                self._pending_cancels.append((max(t, self._current_time), o))
+                continue
+            self._cancel_now(o)
+
+    def _cancel_now(self, order: Order) -> None:
         if order.status in (OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
             order.status = OrderStatus.CANCELLED
             self._fill_sim.unregister_order(order.id)
             self._open_orders = [o for o in self._open_orders if o.id != order.id]
             self._pending_orders = [(t, o) for t, o in self._pending_orders if o.id != order.id]
 
-    def cancel_all_orders(self, *, market_id: str | None = None) -> None:
+    def cancel_all_orders(self, *, market_id: str | None = None, immediate: bool = False) -> None:
+        if self._cancel_latency_ms > 0 and not immediate:
+            for o in self._open_orders + [o for _, o in self._pending_orders]:
+                if market_id is None or o.market_id == market_id:
+                    self.cancel_order(o)
+            return
+        self._pending_cancels = [
+            (t, o) for t, o in self._pending_cancels if market_id is not None and o.market_id != market_id
+        ]
         remaining: list[Order] = []
         for o in self._open_orders:
             if o.status in (OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED) and (
@@ -1104,6 +1148,8 @@ class _EngineCore:
                 self._settled_at[fill.market_id] = fill.timestamp + self._settlement_delay_ms
         # Apply to portfolio — may also raise ValueError for insufficient shares
         self._portfolio.apply_fill(fill)
+        if not fill.is_maker:
+            self._fill_sim.commit_taken()
 
         # CTF auto-merge: redeem any matched YES+NO pairs back to cash at $1 each.
         if self._auto_merge:
@@ -1155,6 +1201,9 @@ class _EngineCore:
         is_first = False
 
         self._activate_pending_orders(market_id=market.id)
+        # An order must not fill on an event at or after its cancel / expiry time.
+        self._apply_due_cancels(event.t)
+        self._expire_orders()
 
         if isinstance(event, TradeEvent):
             self._try_fill_limit_orders(event)
@@ -1186,7 +1235,7 @@ class _EngineCore:
 
     def _finalize_market(self, market: Market) -> None:
         self._strategy.on_market_end(self._ctx, market)
-        self.cancel_all_orders(market_id=market.id)
+        self.cancel_all_orders(market_id=market.id, immediate=True)
 
         if market.status == "resolved" and market.winning_outcome_index is not None:
             timestamp = market.resolved_at or market.close_time or self._current_time

@@ -9,25 +9,45 @@ class FeeModel(ABC):
 
 
 class PolymarketFeeModel(FeeModel):
-    """Polymarket fees: ``fee = shares * p * fee_rate * (p*(1-p))^exponent``.
+    """Polymarket fees (docs.polymarket.com/trading/fees, 2026):
+    taker ``fee = shares * fee_rate * (p*(1-p))^exponent``, rounded to 5 d.p.
 
-    Taker only (maker = 0).  Use :meth:`crypto` / :meth:`sports` presets
-    or :meth:`for_category` to auto-detect from a market's category.
+    Makers pay nothing and get ``rebate_rate`` of the taker fee their fill
+    generated back, returned as a negative fee. Real rebates are pooled per
+    market by maker volume, so this is an estimate.  Use :meth:`for_category`
+    to pick the schedule from a market's category.
     """
 
-    def __init__(self, fee_rate: float, exponent: int = 1) -> None:
+    def __init__(self, fee_rate: float, exponent: float = 1, rebate_rate: float = 0.0) -> None:
         self._fee_rate = fee_rate
         self._exponent = exponent
+        self._rebate_rate = rebate_rate
+
+    # category -> (taker fee rate, maker rebate rate)
+    _SCHEDULE = {
+        "crypto": (0.07, 0.20),
+        "sports": (0.05, 0.15),
+        "finance": (0.04, 0.25),
+        "politics": (0.04, 0.25),
+        "economics": (0.05, 0.25),
+        "culture": (0.05, 0.25),
+        "weather": (0.05, 0.25),
+        "mentions": (0.04, 0.25),
+        "tech": (0.04, 0.25),
+        "other": (0.05, 0.25),
+        "general": (0.05, 0.25),
+        "geopolitics": (0.0, 0.0),
+    }
 
     @classmethod
     def crypto(cls) -> PolymarketFeeModel:
-        """Crypto markets: fee_rate=0.25, exponent=2. Max ~1.56% at p=0.50."""
-        return cls(0.25, exponent=2)
+        """Crypto markets: fee_rate=0.07, 20% rebate. 0.0175/share at p=0.50."""
+        return cls(0.07, rebate_rate=0.20)
 
     @classmethod
     def sports(cls) -> PolymarketFeeModel:
-        """Sports markets (NCAAB, Serie A): fee_rate=0.0175, exponent=1. Max ~0.44% at p=0.50."""
-        return cls(0.0175, exponent=1)
+        """Sports markets: fee_rate=0.05, 15% rebate (0.0125/share at p=0.50)."""
+        return cls(0.05, rebate_rate=0.15)
 
     _SPORTS_CATEGORIES = frozenset({
         "sports", "football", "basketball", "baseball", "hockey",
@@ -37,21 +57,20 @@ class PolymarketFeeModel(FeeModel):
 
     @classmethod
     def for_category(cls, category: str | None) -> FeeModel:
-        """Return the correct fee model for a Polymarket market category."""
+        """Return the fee model for a Polymarket market category (zero when unknown)."""
         if not category:
             return ZeroFeeModel()
         cat = category.lower()
-        if cat == "crypto":
-            return cls.crypto()
         if cat in cls._SPORTS_CATEGORIES:
-            return cls.sports()
-        return ZeroFeeModel()
+            cat = "sports"
+        if cat not in cls._SCHEDULE or cls._SCHEDULE[cat][0] == 0.0:
+            return ZeroFeeModel()
+        rate, rebate = cls._SCHEDULE[cat]
+        return cls(rate, rebate_rate=rebate)
 
     def calculate(self, price: float, size: float, is_maker: bool) -> float:
-        if is_maker:
-            return 0.0
-        fee_per_share = price * self._fee_rate * (price * (1.0 - price)) ** self._exponent
-        return fee_per_share * size
+        taker = round(size * self._fee_rate * (price * (1.0 - price)) ** self._exponent, 5)
+        return -round(taker * self._rebate_rate, 5) if is_maker else taker
 
 
 class ZeroFeeModel(FeeModel):

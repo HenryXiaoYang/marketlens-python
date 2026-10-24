@@ -81,34 +81,40 @@ SNAPSHOT_2 = {
 class TestFeeModels:
     def test_crypto_fee_at_midpoint(self):
         fm = PolymarketFeeModel.crypto()
-        # fee = 100 * 0.50 * 0.25 * (0.50 * 0.50)^2 = 100 * 0.0078125 = 0.78125
+        # docs.polymarket.com/trading/fees: 100 shares at 0.50 pay 100 * 0.07 * 0.25 = 1.75
         fee = fm.calculate(0.5000, 100, is_maker=False)
-        assert fee == pytest.approx(0.78125)
+        assert fee == pytest.approx(1.75)
 
     def test_crypto_fee_at_extreme(self):
         fm = PolymarketFeeModel.crypto()
-        # fee = 100 * 0.99 * 0.25 * (0.99 * 0.01)^2 = 100 * 0.99 * 0.25 * 0.000098 ≈ 0.002426
+        # fee = 100 * 0.07 * 0.99 * 0.01 = 0.0693; symmetric in p
         fee = fm.calculate(0.9900, 100, is_maker=False)
-        assert fee == pytest.approx(0.002426, abs=1e-5)
+        assert fee == pytest.approx(0.0693)
+        assert fm.calculate(0.0100, 100, is_maker=False) == fee
 
     def test_sports_fee_at_midpoint(self):
         fm = PolymarketFeeModel.sports()
-        # fee = 100 * 0.50 * 0.0175 * (0.50 * 0.50)^1 = 100 * 0.0021875 = 0.21875
+        # fee = 100 * 0.05 * 0.25 = 1.25
         fee = fm.calculate(0.5000, 100, is_maker=False)
-        assert fee == pytest.approx(0.21875)
+        assert fee == pytest.approx(1.25)
 
-    def test_polymarket_maker_zero(self):
+    def test_polymarket_maker_rebate(self):
+        # Makers pay nothing and get 20% of the taker fee back (a negative fee).
         fm = PolymarketFeeModel.crypto()
-        fee = fm.calculate(0.5000, 100, is_maker=True)
-        assert fee == 0
+        assert fm.calculate(0.5000, 100, is_maker=True) == pytest.approx(-0.35)
+        assert PolymarketFeeModel(0.07).calculate(0.5000, 100, is_maker=True) == 0
 
     def test_for_category_crypto(self):
         fm = PolymarketFeeModel.for_category("Crypto")
         fee = fm.calculate(0.5000, 100, is_maker=False)
-        assert fee == pytest.approx(0.78125)
+        assert fee == pytest.approx(1.75)
+        assert PolymarketFeeModel.for_category("Weather").calculate(0.5, 100, is_maker=False) == pytest.approx(1.25)
+        assert PolymarketFeeModel.for_category("nba").calculate(0.5, 100, is_maker=False) == pytest.approx(1.25)
 
-    def test_for_category_other_returns_zero(self):
-        fm = PolymarketFeeModel.for_category("Weather")
+    def test_for_category_unknown_returns_zero(self):
+        fm = PolymarketFeeModel.for_category("Geopolitics")
+        assert fm.calculate(0.5000, 100, is_maker=False) == 0
+        fm = PolymarketFeeModel.for_category("Unlisted")
         fee = fm.calculate(0.5000, 100, is_maker=False)
         assert fee == 0
 
@@ -1770,10 +1776,63 @@ class TestLatencySimulation:
             return_value=httpx.Response(200, json=_history_response(
                 SNAPSHOT_1, DELTA_1, SNAPSHOT_2)))
 
-        result = client.backtest(CancelPending(), "m1", after=1000, before=6000,
-                                 initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
+        from marketlens.backtest import BacktestConfig, BacktestEngine
+
+        # No cancel latency: the cancel beats the order to the exchange.
+        cfg = BacktestConfig(initial_cash=10000.0, latency_ms=50, cancel_latency_ms=0, limit_fill_rate=1.0)
+        result = BacktestEngine(CancelPending(), cfg).run(client, "m1", after=1000, before=6000)
         assert result.total_trades == 0
         assert result.orders_df()["status"].iloc[0] == "CANCELLED"
+
+    def test_cancel_in_flight_order_still_arrives(self, mock_api, client):
+        """With cancel latency (default = latency_ms) a market order already sent still fills."""
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        class CancelPending(Strategy):
+            def on_market_start(self, ctx, market, book):
+                ctx.cancel(ctx.buy_yes(size="100.0000"))
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(
+                SNAPSHOT_1, DELTA_1, SNAPSHOT_2)))
+
+        result = client.backtest(CancelPending(), "m1", after=1000, before=6000,
+                                 initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
+        assert result.total_trades == 1
+
+
+class TestCancelLatency:
+    """A resting order stays fillable until its cancel lands, and never fills at or after it."""
+
+    def _run(self, mock_api, client, cancel_latency_ms, cancel_after=None):
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        class RestThenCancel(Strategy):
+            def on_market_start(self, ctx, market, book):
+                self.o = ctx.buy_yes(size="50.0000", limit_price="0.6500", cancel_after=cancel_after)
+
+            def on_book(self, ctx, market, book):
+                if ctx.time >= 1500 and cancel_after is None and self.o.status.value != "CANCELLED":
+                    ctx.cancel(self.o)  # at t=1500; TRADE_SELL hits 0.65 at t=2000
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1, DELTA_1, TRADE_SELL, SNAPSHOT_2)))
+        from marketlens.backtest import BacktestConfig, BacktestEngine
+        cfg = BacktestConfig(initial_cash=10000.0, latency_ms=0, cancel_latency_ms=cancel_latency_ms,
+                             limit_fill_rate=1.0, progress=False)
+        return BacktestEngine(RestThenCancel(), cfg).run(client, "m1", after=1000, before=6000)
+
+    def test_fills_while_cancel_in_flight(self, mock_api, client):
+        assert self._run(mock_api, client, cancel_latency_ms=600).total_trades == 1
+
+    def test_cancel_landed_before_trade(self, mock_api, client):
+        assert self._run(mock_api, client, cancel_latency_ms=400).total_trades == 0
+
+    def test_no_fill_on_the_expiring_event(self, mock_api, client):
+        assert self._run(mock_api, client, cancel_latency_ms=0, cancel_after=2000).total_trades == 0
+        assert self._run(mock_api, client, cancel_latency_ms=0, cancel_after=2001).total_trades == 1
 
 
 # ── Slippage Buffer Tests ──────────────────────────────────────

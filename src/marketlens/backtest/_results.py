@@ -712,6 +712,7 @@ def _serialize_fee_model(model: FeeModel | None) -> dict | None:
             "type": "polymarket",
             "fee_rate": model._fee_rate,
             "exponent": model._exponent,
+            "rebate_rate": model._rebate_rate,
         }
     return None
 
@@ -727,7 +728,8 @@ def _deserialize_fee_model(data: dict | None) -> FeeModel | None:
     if t == "polymarket":
         return PolymarketFeeModel(
             float(data["fee_rate"]),
-            exponent=int(data.get("exponent", 1)),
+            exponent=float(data.get("exponent", 1)),
+            rebate_rate=float(data.get("rebate_rate", 0.0)),
         )
     return None
 
